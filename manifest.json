@@ -1,14 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Auto-McGraw Smartbook",
-  "version": "1.9",
-  "description": "Transfers a question from MHEducation's Smartbook to AI assistants and then uses their response to auto‐select an answer.",
-  "permissions": ["tabs", "scripting", "storage"],
+  "version": "2.0",
+  "description": "Transfers a question from MHEducation's Smartbook to Gemini AI and then uses the response to auto-select an answer.",
+  "permissions": ["storage"],
   "host_permissions": [
     "https://learning.mheducation.com/*",
-    "https://chatgpt.com/*",
-    "https://gemini.google.com/*",
-    "https://deepseek.chat/*"
+    "https://generativelanguage.googleapis.com/*"
   ],
   "background": {
     "service_worker": "background/background.js"
@@ -24,18 +22,6 @@
     {
       "matches": ["https://learning.mheducation.com/static/awd/*"],
       "js": ["content-scripts/mheducation.js"]
-    },
-    {
-      "matches": ["https://chatgpt.com/*"],
-      "js": ["content-scripts/chatgpt.js"]
-    },
-    {
-      "matches": ["https://gemini.google.com/*"],
-      "js": ["content-scripts/gemini.js"]
-    },
-    {
-      "matches": ["https://chat.deepseek.com/*"],
-      "js": ["content-scripts/deepseek.js"]
     }
   ],
   "web_accessible_resources": [
@@ -43,7 +29,8 @@
       "resources": [
         "popup/settings.html",
         "popup/settings.css",
-        "popup/settings.js"
+        "popup/settings.js",
+        "services/api-service.js"
       ],
       "matches": ["<all_urls>"]
     }

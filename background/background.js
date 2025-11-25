@@ -1,29 +1,50 @@
+// Import API service
+importScripts("../services/api-service.js");
+
 let mheTabId = null;
-let aiTabId = null;
-let aiType = null;
-let lastActiveTabId = null;
 let processingQuestion = false;
-let mheWindowId = null;
-let aiWindowId = null;
 
-chrome.tabs.onActivated.addListener((activeInfo) => {
-  lastActiveTabId = activeInfo.tabId;
-});
+// ==================== DEBUG LOGGING ====================
+function debugLog(section, message, data = null) {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] [${section}] ${message}`);
+  if (data) {
+    console.log(`[${timestamp}] [${section}] Data:`, JSON.stringify(data, null, 2));
+  }
+}
 
+function debugError(section, message, error) {
+  const timestamp = new Date().toISOString();
+  console.error(`[${timestamp}] [${section}] ERROR: ${message}`);
+  console.error(`[${timestamp}] [${section}] Error details:`, error);
+}
+
+// ==================== MESSAGE HANDLING ====================
+
+/**
+ * Sends a message to a tab with retry logic
+ */
 function sendMessageWithRetry(tabId, message, maxAttempts = 3, delay = 1000) {
+  debugLog("sendMessageWithRetry", `Sending message to tab ${tabId}`, message);
+
   return new Promise((resolve, reject) => {
     let attempts = 0;
 
     function attemptSend() {
       attempts++;
+      debugLog("sendMessageWithRetry", `Attempt ${attempts}/${maxAttempts}`);
+
       chrome.tabs.sendMessage(tabId, message, (response) => {
         if (chrome.runtime.lastError) {
+          debugError("sendMessageWithRetry", `Attempt ${attempts} failed`, chrome.runtime.lastError);
+
           if (attempts < maxAttempts) {
             setTimeout(attemptSend, delay);
           } else {
             reject(chrome.runtime.lastError);
           }
         } else {
+          debugLog("sendMessageWithRetry", "Message sent successfully", response);
           resolve(response);
         }
       });
@@ -33,203 +54,215 @@ function sendMessageWithRetry(tabId, message, maxAttempts = 3, delay = 1000) {
   });
 }
 
-async function focusTab(tabId) {
-  if (!tabId) return false;
+// ==================== QUESTION PROCESSING ====================
 
-  try {
-    const tab = await chrome.tabs.get(tabId);
-
-    if (tab.windowId === chrome.windows.WINDOW_ID_CURRENT) {
-      await chrome.tabs.update(tabId, { active: true });
-      return true;
-    }
-
-    await chrome.windows.update(tab.windowId, { focused: true });
-    await chrome.tabs.update(tabId, { active: true });
-    return true;
-  } catch (error) {
-    return false;
-  }
-}
-
-async function findAndStoreTabs() {
-  const mheTabs = await chrome.tabs.query({
-    url: "https://learning.mheducation.com/*",
-  });
-  if (mheTabs.length > 0) {
-    mheTabId = mheTabs[0].id;
-    mheWindowId = mheTabs[0].windowId;
-  }
-
-  const data = await chrome.storage.sync.get("aiModel");
-  const aiModel = data.aiModel || "chatgpt";
-  aiType = aiModel;
-
-  if (aiModel === "chatgpt") {
-    const tabs = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
-    if (tabs.length > 0) {
-      aiTabId = tabs[0].id;
-      aiWindowId = tabs[0].windowId;
-    }
-  } else if (aiModel === "gemini") {
-    const tabs = await chrome.tabs.query({
-      url: "https://gemini.google.com/*",
-    });
-    if (tabs.length > 0) {
-      aiTabId = tabs[0].id;
-      aiWindowId = tabs[0].windowId;
-    }
-  } else if (aiModel === "deepseek") {
-    const tabs = await chrome.tabs.query({
-      url: "https://chat.deepseek.com/*",
-    });
-    if (tabs.length > 0) {
-      aiTabId = tabs[0].id;
-      aiWindowId = tabs[0].windowId;
-    }
-  }
-}
-
-async function shouldFocusTabs() {
-  await findAndStoreTabs();
-  return mheWindowId === aiWindowId;
-}
-
+/**
+ * Processes a question from McGraw Hill
+ * Uses EXACT same logic as original gemini.js but with direct API calls
+ */
 async function processQuestion(message) {
-  if (processingQuestion) return;
+  debugLog("processQuestion", "=== STARTING QUESTION PROCESSING ===");
+  debugLog("processQuestion", "Received question", message.question);
+
+  if (processingQuestion) {
+    debugLog("processQuestion", "Already processing a question, skipping");
+    return;
+  }
+
   processingQuestion = true;
 
   try {
-    await findAndStoreTabs();
+    mheTabId = message.sourceTabId;
+    debugLog("processQuestion", `McGraw Hill tab ID: ${mheTabId}`);
 
-    if (!aiTabId) {
+    // Get API key from storage
+    debugLog("processQuestion", "Retrieving API key from storage");
+    const data = await chrome.storage.sync.get("geminiApiKey");
+    const apiKey = data.geminiApiKey;
+
+    if (!apiKey) {
+      debugError("processQuestion", "No API key configured", null);
       await sendMessageWithRetry(mheTabId, {
         type: "alertMessage",
-        message: `Please open ${aiType} in another tab before using automation.`,
+        message:
+          "Please configure your Gemini API key in the extension settings before using automation.",
       });
       processingQuestion = false;
       return;
     }
 
-    if (!mheTabId) {
-      mheTabId = message.sourceTabId;
-    }
+    debugLog("processQuestion", "API key retrieved successfully");
+    debugLog("processQuestion", "Calling Gemini API...");
 
-    const sameWindow = await shouldFocusTabs();
+    try {
+      // Call Gemini API directly - EXACT same prompt format as original
+      debugLog("processQuestion", "=== CALLING GEMINI API ===");
+      const apiResponse = await askGemini(apiKey, message.question);
 
-    if (sameWindow) {
-      await focusTab(aiTabId);
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    }
+      debugLog("processQuestion", "=== API RESPONSE RECEIVED ===", apiResponse);
 
-    await sendMessageWithRetry(aiTabId, {
-      type: "receiveQuestion",
-      question: message.question,
-    });
+      // Process response EXACTLY like original gemini.js
+      let responseText;
 
-    if (sameWindow && lastActiveTabId && lastActiveTabId !== aiTabId) {
-      setTimeout(async () => {
-        await focusTab(lastActiveTabId);
-      }, 1000);
+      if (typeof apiResponse === "string") {
+        responseText = apiResponse;
+      } else if (apiResponse.answer) {
+        // Already parsed JSON with answer field
+        responseText = JSON.stringify(apiResponse);
+      } else {
+        // Try to stringify if it's an object
+        responseText = JSON.stringify(apiResponse);
+      }
+
+      debugLog("processQuestion", "Response text prepared", { responseText });
+
+      // Clean up response text - EXACT same as original
+      responseText = responseText
+        .replace(/[\u200B-\u200D\uFEFF]/g, "")
+        .replace(/\n\s*/g, " ")
+        .trim();
+
+      debugLog("processQuestion", "Response text cleaned", { responseText });
+
+      // Try to parse JSON from response
+      let parsedResponse;
+      try {
+        parsedResponse = JSON.parse(responseText);
+        debugLog("processQuestion", "Response parsed successfully", parsedResponse);
+      } catch (parseError) {
+        debugLog("processQuestion", "Initial parse failed, trying to extract JSON");
+
+        // Try to extract JSON from text - EXACT same as original
+        const jsonPattern = /\{[\s\S]*?"answer"[\s\S]*?"explanation"[\s\S]*?\}/;
+        const jsonMatch = responseText.match(jsonPattern);
+
+        if (jsonMatch) {
+          parsedResponse = JSON.parse(jsonMatch[0]);
+          debugLog("processQuestion", "JSON extracted and parsed", parsedResponse);
+        } else {
+          // Try simpler pattern
+          const simpleMatch = responseText.match(/\{[\s\S]*\}/);
+          if (simpleMatch) {
+            parsedResponse = JSON.parse(simpleMatch[0]);
+            debugLog("processQuestion", "JSON extracted with simple pattern", parsedResponse);
+          } else {
+            throw new Error("Could not find valid JSON in response");
+          }
+        }
+      }
+
+      // Verify we have an answer
+      if (!parsedResponse || !parsedResponse.answer) {
+        debugError("processQuestion", "No answer field in parsed response", parsedResponse);
+        throw new Error("Response missing 'answer' field");
+      }
+
+      debugLog("processQuestion", "=== SENDING RESPONSE TO McGRAW HILL ===", parsedResponse);
+
+      // Send response back to content script - EXACT message type as original
+      await sendMessageWithRetry(mheTabId, {
+        type: "processChatGPTResponse",
+        response: JSON.stringify(parsedResponse),
+      });
+
+      debugLog("processQuestion", "=== QUESTION PROCESSING COMPLETE ===");
+
+    } catch (apiError) {
+      debugError("processQuestion", "API call failed", apiError);
+
+      let errorMessage = "Failed to get response from Gemini AI.";
+
+      if (apiError.message.includes("API key") || apiError.message.includes("403")) {
+        errorMessage = "Invalid API key. Please check your API key in settings.";
+      } else if (apiError.message.includes("quota") || apiError.message.includes("429")) {
+        errorMessage = "API rate limit exceeded. Please wait a moment and try again.";
+      } else if (apiError.message.includes("network") || apiError.message.includes("fetch")) {
+        errorMessage = "Network error. Please check your internet connection.";
+      } else if (apiError.message.includes("parse") || apiError.message.includes("JSON")) {
+        errorMessage = "Failed to parse API response. The AI may have returned an invalid format.";
+      } else if (apiError.message.includes("Stopped") || apiError.message.includes("blocked")) {
+        errorMessage = "Content was blocked by safety filters. Try rephrasing the question.";
+      }
+
+      debugLog("processQuestion", "Sending error alert to user", { errorMessage });
+
+      await sendMessageWithRetry(mheTabId, {
+        type: "alertMessage",
+        message: errorMessage + "\n\nError details: " + apiError.message,
+      });
     }
   } catch (error) {
+    debugError("processQuestion", "Unexpected error in question processing", error);
+
     if (mheTabId) {
       await sendMessageWithRetry(mheTabId, {
         type: "alertMessage",
-        message: `Error communicating with ${aiType}. Please make sure it's open in another tab.`,
+        message: "An unexpected error occurred. Please try again.\n\nError: " + error.message,
       });
     }
   } finally {
     processingQuestion = false;
+    debugLog("processQuestion", "Processing flag reset");
   }
 }
 
-async function processResponse(message) {
+// ==================== API KEY TESTING ====================
+
+/**
+ * Tests an API key
+ */
+async function testApiKey(apiKey) {
+  debugLog("testApiKey", "Testing API key");
+
   try {
-    if (!mheTabId) {
-      const mheTabs = await chrome.tabs.query({
-        url: "https://learning.mheducation.com/*",
-      });
-      if (mheTabs.length > 0) {
-        mheTabId = mheTabs[0].id;
-        mheWindowId = mheTabs[0].windowId;
-      } else {
-        return;
-      }
-    }
-
-    const sameWindow = await shouldFocusTabs();
-
-    if (sameWindow) {
-      await focusTab(mheTabId);
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    }
-
-    await sendMessageWithRetry(mheTabId, {
-      type: "processChatGPTResponse",
-      response: message.response,
-    });
+    const result = await validateApiKey(apiKey);
+    debugLog("testApiKey", "Validation result", result);
+    return result;
   } catch (error) {
-    console.error("Error processing AI response:", error);
+    debugError("testApiKey", "Validation error", error);
+    throw error;
   }
 }
+
+// ==================== MESSAGE LISTENERS ====================
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (sender.tab) {
-    message.sourceTabId = sender.tab.id;
-
-    if (sender.tab.url.includes("learning.mheducation.com")) {
-      mheTabId = sender.tab.id;
-      mheWindowId = sender.tab.windowId;
-    } else if (sender.tab.url.includes("chatgpt.com")) {
-      aiTabId = sender.tab.id;
-      aiWindowId = sender.tab.windowId;
-      aiType = "chatgpt";
-    } else if (sender.tab.url.includes("gemini.google.com")) {
-      aiTabId = sender.tab.id;
-      aiWindowId = sender.tab.windowId;
-      aiType = "gemini";
-    } else if (sender.tab.url.includes("chat.deepseek.com")) {
-      aiTabId = sender.tab.id;
-      aiWindowId = sender.tab.windowId;
-      aiType = "deepseek";
-    }
-  }
+  debugLog("onMessage", "Received message", { type: message.type, sender: sender.tab?.id });
 
   if (message.type === "sendQuestionToChatGPT") {
+    debugLog("onMessage", "Question received from McGraw Hill");
+    message.sourceTabId = sender.tab.id;
     processQuestion(message);
     sendResponse({ received: true });
     return true;
   }
 
-  if (
-    message.type === "chatGPTResponse" ||
-    message.type === "geminiResponse" ||
-    message.type === "deepseekResponse"
-  ) {
-    processResponse(message);
-    sendResponse({ received: true });
-    return true;
-  }
-
   if (message.type === "openSettings") {
+    debugLog("onMessage", "Opening settings");
     chrome.windows.create({
       url: chrome.runtime.getURL("popup/settings.html"),
       type: "popup",
-      width: 500,
-      height: 520,
+      width: 450,
+      height: 600,
     });
-    sendResponse({ received: true });
+    return false;
+  }
+
+  if (message.type === "testApiKey") {
+    debugLog("onMessage", "Testing API key");
+    testApiKey(message.apiKey)
+      .then((result) => {
+        debugLog("onMessage", "Test result", result);
+        sendResponse(result);
+      })
+      .catch((error) => {
+        debugError("onMessage", "Test failed", error);
+        sendResponse({ valid: false, error: error.message });
+      });
     return true;
   }
 
-  sendResponse({ received: false });
   return false;
 });
 
-findAndStoreTabs();
-
-chrome.tabs.onRemoved.addListener((tabId) => {
-  if (tabId === mheTabId) mheTabId = null;
-  if (tabId === aiTabId) aiTabId = null;
-});
+debugLog("background", "=== BACKGROUND SCRIPT LOADED ===");

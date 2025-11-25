@@ -4,18 +4,25 @@ let lastIncorrectQuestion = null;
 let lastCorrectAnswer = null;
 
 function setupMessageListener() {
+  console.log("[setupMessageListener] Setting up message listener");
+
   if (messageListener) {
+    console.log("[setupMessageListener] Removing existing listener");
     chrome.runtime.onMessage.removeListener(messageListener);
   }
 
   messageListener = (message, sender, sendResponse) => {
+    console.log("[Message Listener] Received message:", message.type);
+
     if (message.type === "processChatGPTResponse") {
+      console.log("[Message Listener] Processing ChatGPT response");
       processChatGPTResponse(message.response);
       sendResponse({ received: true });
       return true;
     }
 
     if (message.type === "alertMessage") {
+      console.log("[Message Listener] Showing alert:", message.message);
       alert(message.message);
       sendResponse({ received: true });
       return true;
@@ -23,6 +30,7 @@ function setupMessageListener() {
   };
 
   chrome.runtime.onMessage.addListener(messageListener);
+  console.log("[setupMessageListener] Listener added successfully");
 }
 
 function handleTopicOverview() {
@@ -82,25 +90,50 @@ function handleForcedLearning() {
 }
 
 function checkForNextStep() {
-  if (!isAutomating) return;
+  console.log("[checkForNextStep] Called, isAutomating:", isAutomating);
 
+  if (!isAutomating) {
+    console.log("[checkForNextStep] Not automating, returning");
+    return;
+  }
+
+  console.log("[checkForNextStep] Checking for topic overview");
   if (handleTopicOverview()) {
+    console.log("[checkForNextStep] Handled topic overview");
     return;
   }
 
+  console.log("[checkForNextStep] Checking for forced learning");
   if (handleForcedLearning()) {
+    console.log("[checkForNextStep] Handled forced learning");
     return;
   }
 
+  console.log("[checkForNextStep] Looking for question container");
   const container = document.querySelector(".probe-container");
+
   if (container && !container.querySelector(".forced-learning")) {
+    console.log("[checkForNextStep] Container found, parsing question");
     const qData = parseQuestion();
+
     if (qData) {
+      console.log("[checkForNextStep] Question parsed:", qData);
+      console.log("[checkForNextStep] Sending message to background script");
+
       chrome.runtime.sendMessage({
         type: "sendQuestionToChatGPT",
         question: qData,
+      }, (response) => {
+        console.log("[checkForNextStep] Background script response:", response);
+        if (chrome.runtime.lastError) {
+          console.error("[checkForNextStep] Runtime error:", chrome.runtime.lastError);
+        }
       });
+    } else {
+      console.log("[checkForNextStep] Question parsing returned null");
     }
+  } else {
+    console.log("[checkForNextStep] No container found or forced learning present");
   }
 }
 
@@ -267,78 +300,129 @@ function cleanAnswer(answer) {
 }
 
 function processChatGPTResponse(responseText) {
+  console.log("[processChatGPTResponse] === PROCESSING RESPONSE ===");
+  console.log("[processChatGPTResponse] Raw response text:", responseText);
+
   try {
     if (handleTopicOverview()) {
+      console.log("[processChatGPTResponse] Handled topic overview, returning");
       return;
     }
 
     if (handleForcedLearning()) {
+      console.log("[processChatGPTResponse] Handled forced learning, returning");
       return;
     }
 
+    console.log("[processChatGPTResponse] Parsing JSON response");
     const response = JSON.parse(responseText);
-    const answers = Array.isArray(response.answer)
-      ? response.answer
-      : [response.answer];
+    console.log("[processChatGPTResponse] Parsed response:", response);
+
+    // Extract answers and handle newline-separated answers (for multiple select)
+    let answers;
+    if (Array.isArray(response.answer)) {
+      answers = response.answer;
+    } else if (typeof response.answer === 'string' && response.answer.includes('\n')) {
+      // Split on newlines for multiple select questions
+      answers = response.answer.split('\n').map(a => a.trim()).filter(a => a);
+      console.log("[processChatGPTResponse] Split newline-separated answer into array");
+    } else {
+      answers = [response.answer];
+    }
+
+    console.log("[processChatGPTResponse] Extracted answers:", answers);
 
     const container = document.querySelector(".probe-container");
-    if (!container) return;
+    if (!container) {
+      console.error("[processChatGPTResponse] No probe container found!");
+      return;
+    }
 
+    console.log("[processChatGPTResponse] Found probe container");
     lastIncorrectQuestion = null;
     lastCorrectAnswer = null;
 
     if (container.querySelector(".awd-probe-type-matching")) {
+      console.log("[processChatGPTResponse] Matching question detected");
       alert(
         "Matching Question Solution:\n\n" +
-          answers.join("\n") +
-          "\n\nPlease input these matches manually, then click high confidence and next."
+        answers.join("\n") +
+        "\n\nPlease input these matches manually, then click high confidence and next."
       );
     } else if (container.querySelector(".awd-probe-type-fill_in_the_blank")) {
+      console.log("[processChatGPTResponse] Fill in the blank question detected");
       const inputs = container.querySelectorAll("input.fitb-input");
+      console.log("[processChatGPTResponse] Found", inputs.length, "input fields");
+
       inputs.forEach((input, index) => {
         if (answers[index]) {
+          console.log(`[processChatGPTResponse] Filling input ${index} with:`, answers[index]);
           input.value = answers[index];
           input.dispatchEvent(new Event("input", { bubbles: true }));
         }
       });
     } else {
+      console.log("[processChatGPTResponse] Multiple choice/select question detected");
       const choices = container.querySelectorAll(
         'input[type="radio"], input[type="checkbox"]'
       );
 
-      choices.forEach((choice) => {
+      console.log("[processChatGPTResponse] Found", choices.length, "choices");
+
+      choices.forEach((choice, choiceIndex) => {
         const label = choice.closest("label");
         if (label) {
           const choiceText = label
             .querySelector(".choiceText")
             ?.textContent.trim();
+
+          console.log(`[processChatGPTResponse] Choice ${choiceIndex}: "${choiceText}"`);
+
           if (choiceText) {
             const shouldBeSelected = answers.some((ans) => {
-              if (choiceText === ans) return true;
+              console.log(`[processChatGPTResponse]   Comparing with answer: "${ans}"`);
+
+              if (choiceText === ans) {
+                console.log(`[processChatGPTResponse]   ✓ Exact match!`);
+                return true;
+              }
 
               const choiceWithoutPeriod = choiceText.replace(/\.$/, "");
               const answerWithoutPeriod = ans.replace(/\.$/, "");
-              if (choiceWithoutPeriod === answerWithoutPeriod) return true;
+              if (choiceWithoutPeriod === answerWithoutPeriod) {
+                console.log(`[processChatGPTResponse]   ✓ Match without period!`);
+                return true;
+              }
 
-              if (choiceText === ans + ".") return true;
+              if (choiceText === ans + ".") {
+                console.log(`[processChatGPTResponse]   ✓ Match with added period!`);
+                return true;
+              }
 
               return false;
             });
 
             if (shouldBeSelected) {
+              console.log(`[processChatGPTResponse] ✓✓✓ CLICKING choice ${choiceIndex}: "${choiceText}"`);
               choice.click();
+            } else {
+              console.log(`[processChatGPTResponse]   Skipping choice ${choiceIndex}`);
             }
           }
         }
       });
     }
 
+    console.log("[processChatGPTResponse] Answer selection complete");
+
     if (isAutomating) {
+      console.log("[processChatGPTResponse] Automation is ON, waiting for confidence button");
       waitForElement(
         '[data-automation-id="confidence-buttons--high_confidence"]:not([disabled])',
         10000
       )
         .then((button) => {
+          console.log("[processChatGPTResponse] Confidence button found, clicking");
           button.click();
 
           setTimeout(() => {
@@ -346,37 +430,46 @@ function processChatGPTResponse(responseText) {
               ".awd-probe-correctness.incorrect"
             );
             if (incorrectMarker) {
+              console.log("[processChatGPTResponse] Answer was incorrect, extracting correct answer");
               const correctionData = extractCorrectAnswer();
               if (correctionData && correctionData.answer) {
                 lastIncorrectQuestion = correctionData.question;
                 lastCorrectAnswer = cleanAnswer(correctionData.answer);
                 console.log(
-                  "Found incorrect answer. Correct answer is:",
+                  "[processChatGPTResponse] Correct answer was:",
                   lastCorrectAnswer
                 );
               }
+            } else {
+              console.log("[processChatGPTResponse] Answer was correct!");
             }
 
+            console.log("[processChatGPTResponse] Waiting for next button");
             waitForElement(".next-button", 10000)
               .then((nextButton) => {
+                console.log("[processChatGPTResponse] Next button found, clicking");
                 nextButton.click();
                 setTimeout(() => {
+                  console.log("[processChatGPTResponse] Moving to next question");
                   checkForNextStep();
                 }, 1000);
               })
               .catch((error) => {
-                console.error("Automation error:", error);
+                console.error("[processChatGPTResponse] Next button error:", error);
                 isAutomating = false;
               });
           }, 1000);
         })
         .catch((error) => {
-          console.error("Automation error:", error);
+          console.error("[processChatGPTResponse] Confidence button error:", error);
           isAutomating = false;
         });
+    } else {
+      console.log("[processChatGPTResponse] Automation is OFF, not proceeding");
     }
   } catch (e) {
-    console.error("Error processing response:", e);
+    console.error("[processChatGPTResponse] Error processing response:", e);
+    console.error("[processChatGPTResponse] Stack trace:", e.stack);
   }
 }
 
@@ -385,87 +478,104 @@ function addAssistantButton() {
     const buttonContainer = document.createElement("div");
     buttonContainer.style.display = "flex";
     buttonContainer.style.marginLeft = "10px";
+    buttonContainer.style.gap = "8px";
+    buttonContainer.style.alignItems = "center";
 
-    chrome.storage.sync.get("aiModel", function (data) {
-      const aiModel = data.aiModel || "chatgpt";
-      let modelName = "ChatGPT";
+    // Retry button (circular, initially hidden)
+    const retryBtn = document.createElement("button");
+    retryBtn.classList.add("btn", "btn-secondary");
+    retryBtn.style.width = "36px";
+    retryBtn.style.height = "36px";
+    retryBtn.style.borderRadius = "50%";
+    retryBtn.style.padding = "0";
+    retryBtn.style.display = "none";
+    retryBtn.style.border = "2px solid white";
+    retryBtn.style.color = "white";
+    retryBtn.title = "Stop and Retry";
+    retryBtn.innerHTML = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="23 4 23 10 17 10"></polyline>
+        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+      </svg>
+    `;
+    retryBtn.addEventListener("click", () => {
+      // Stop current automation
+      isAutomating = false;
 
-      if (aiModel === "gemini") {
-        modelName = "Gemini";
-      } else if (aiModel === "deepseek") {
-        modelName = "DeepSeek";
-      }
-
-      const btn = document.createElement("button");
-      btn.textContent = `Ask ${modelName}`;
-      btn.classList.add("btn", "btn-secondary");
-      btn.style.borderTopRightRadius = "0";
-      btn.style.borderBottomRightRadius = "0";
-      btn.addEventListener("click", () => {
-        if (isAutomating) {
-          isAutomating = false;
-          chrome.storage.sync.get("aiModel", function (data) {
-            const currentModel = data.aiModel || "chatgpt";
-            let currentModelName = "ChatGPT";
-
-            if (currentModel === "gemini") {
-              currentModelName = "Gemini";
-            } else if (currentModel === "deepseek") {
-              currentModelName = "DeepSeek";
-            }
-
-            btn.textContent = `Ask ${currentModelName}`;
-          });
-        } else {
-          const proceed = confirm(
-            "Start automated answering? Click OK to begin, or Cancel to stop."
-          );
-          if (proceed) {
+      // Wait a brief moment then restart
+      setTimeout(() => {
+        chrome.storage.sync.get("geminiApiKey", function (data) {
+          if (data.geminiApiKey) {
             isAutomating = true;
             btn.textContent = "Stop Automation";
+            retryBtn.style.display = "flex";
             checkForNextStep();
           }
-        }
-      });
-
-      const settingsBtn = document.createElement("button");
-      settingsBtn.classList.add("btn", "btn-secondary");
-      settingsBtn.style.borderTopLeftRadius = "0";
-      settingsBtn.style.borderBottomLeftRadius = "0";
-      settingsBtn.style.borderLeft = "1px solid rgba(0,0,0,0.2)";
-      settingsBtn.style.padding = "6px 10px";
-      settingsBtn.title = "Auto-McGraw Settings";
-      settingsBtn.innerHTML = `
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="3"></circle>
-          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-        </svg>
-      `;
-      settingsBtn.addEventListener("click", () => {
-        chrome.runtime.sendMessage({ type: "openSettings" });
-      });
-
-      buttonContainer.appendChild(btn);
-      buttonContainer.appendChild(settingsBtn);
-      headerNav.appendChild(buttonContainer);
-
-      chrome.storage.onChanged.addListener((changes) => {
-        if (changes.aiModel) {
-          const newModel = changes.aiModel.newValue;
-          let newModelName = "ChatGPT";
-
-          if (newModel === "gemini") {
-            newModelName = "Gemini";
-          } else if (newModel === "deepseek") {
-            newModelName = "DeepSeek";
-          }
-
-          if (!isAutomating) {
-            btn.textContent = `Ask ${newModelName}`;
-          }
-        }
-      });
+        });
+      }, 1000);
     });
+
+    // Main button container
+    const mainButtonGroup = document.createElement("div");
+    mainButtonGroup.style.display = "flex";
+
+    const btn = document.createElement("button");
+    btn.textContent = "Ask Gemini";
+    btn.classList.add("btn", "btn-secondary");
+    btn.style.borderTopRightRadius = "0";
+    btn.style.borderBottomRightRadius = "0";
+    btn.style.color = "white";
+    btn.style.border = "1px solid white";
+    btn.addEventListener("click", () => {
+      console.log("[Ask Gemini Button] Clicked, isAutomating:", isAutomating);
+
+      if (isAutomating) {
+        console.log("[Ask Gemini Button] Stopping automation");
+        isAutomating = false;
+        btn.textContent = "Ask Gemini";
+        retryBtn.style.display = "none";
+      } else {
+        console.log("[Ask Gemini Button] Checking API key");
+        // Check if API key is configured
+        chrome.storage.sync.get("geminiApiKey", function (data) {
+          console.log("[Ask Gemini Button] API key check result:", data.geminiApiKey ? "Found" : "Not found");
+
+          if (!data.geminiApiKey) {
+            console.log("[Ask Gemini Button] No API key, showing alert");
+            alert(
+              "No Gemini API key configured.\n\nPlease click the settings icon and enter your Gemini API key to use automation."
+            );
+            return;
+          }
+
+          console.log("[Ask Gemini Button] Showing confirmation dialog");
+          const proceed = confirm(
+            "Start automated answering with Gemini AI?\n\nClick OK to begin, or Cancel to stop."
+          );
+
+          console.log("[Ask Gemini Button] User confirmation:", proceed);
+
+          if (proceed) {
+            console.log("[Ask Gemini Button] Starting automation");
+            isAutomating = true;
+            btn.textContent = "Stop Automation";
+            retryBtn.style.display = "flex";
+            retryBtn.style.justifyContent = "center";
+            retryBtn.style.alignItems = "center";
+
+            console.log("[Ask Gemini Button] Calling checkForNextStep");
+            checkForNextStep();
+          }
+        });
+      }
+    });
+
+    mainButtonGroup.appendChild(btn);
+    // Settings button removed as requested
+
+    buttonContainer.appendChild(retryBtn);
+    buttonContainer.appendChild(mainButtonGroup);
+    headerNav.appendChild(buttonContainer);
   });
 }
 
@@ -534,9 +644,9 @@ function parseQuestion() {
     options: options,
     previousCorrection: lastIncorrectQuestion
       ? {
-          question: lastIncorrectQuestion,
-          correctAnswer: lastCorrectAnswer,
-        }
+        question: lastIncorrectQuestion,
+        correctAnswer: lastCorrectAnswer,
+      }
       : null,
   };
 }
@@ -557,11 +667,18 @@ function waitForElement(selector, timeout = 5000) {
   });
 }
 
+console.log("=== AUTO-MCGRAW CONTENT SCRIPT LOADED ===");
+console.log("[Init] Setting up message listener");
 setupMessageListener();
+
+console.log("[Init] Adding assistant button");
 addAssistantButton();
 
+console.log("[Init] Checking isAutomating:", isAutomating);
 if (isAutomating) {
+  console.log("[Init] Resuming automation");
   setTimeout(() => {
     checkForNextStep();
   }, 1000);
 }
+console.log("=== AUTO-MCGRAW READY ===");
