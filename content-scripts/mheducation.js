@@ -2,35 +2,169 @@ let messageListener = null;
 let isAutomating = false;
 let lastIncorrectQuestion = null;
 let lastCorrectAnswer = null;
+let visualConsole = null;
+let isProcessing = false; // Lock to prevent multiple simultaneous requests
+
+
+function createVisualConsole() {
+  if (document.getElementById('auto-mcgraw-console')) return;
+
+  const container = document.createElement('div');
+  container.id = 'auto-mcgraw-console';
+  container.style.position = 'fixed';
+  container.style.top = '100px';
+  container.style.right = '20px';
+  container.style.width = '320px';
+  container.style.height = '400px';
+  container.style.backgroundColor = 'rgba(15, 23, 42, 0.95)'; // Slate 900
+  container.style.backdropFilter = 'blur(10px)';
+  container.style.borderRadius = '12px';
+  container.style.border = '1px solid rgba(255, 255, 255, 0.1)';
+  container.style.boxShadow = '0 10px 25px -5px rgba(0, 0, 0, 0.5)';
+  container.style.zIndex = '999999';
+  container.style.fontFamily = "'Inter', system-ui, -apple-system, sans-serif";
+  container.style.display = 'flex';
+  container.style.flexDirection = 'column';
+  container.style.overflow = 'hidden';
+  container.style.transition = 'opacity 0.3s ease, transform 0.3s ease';
+
+  // Header
+  const header = document.createElement('div');
+  header.style.padding = '12px 16px';
+  header.style.borderBottom = '1px solid rgba(255, 255, 255, 0.1)';
+  header.style.display = 'flex';
+  header.style.justifyContent = 'space-between';
+  header.style.alignItems = 'center';
+  header.style.background = 'rgba(255, 255, 255, 0.03)';
+
+  const title = document.createElement('span');
+  title.textContent = 'Auto-McGraw Assistant';
+  title.style.color = '#fff';
+  title.style.fontSize = '14px';
+  title.style.fontWeight = '600';
+  title.style.letterSpacing = '0.5px';
+
+  const statusDot = document.createElement('div');
+  statusDot.style.width = '8px';
+  statusDot.style.height = '8px';
+  statusDot.style.borderRadius = '50%';
+  statusDot.style.backgroundColor = '#10b981'; // Emerald 500
+  statusDot.style.boxShadow = '0 0 8px rgba(16, 185, 129, 0.5)';
+
+  header.appendChild(title);
+  header.appendChild(statusDot);
+
+  // Content Area
+  const content = document.createElement('div');
+  content.id = 'auto-mcgraw-console-content';
+  content.style.flex = '1';
+  content.style.overflowY = 'auto';
+  content.style.padding = '12px';
+  content.style.fontSize = '12px';
+  content.style.lineHeight = '1.5';
+  content.style.color = '#cbd5e1'; // Slate 300
+  content.style.display = 'flex';
+  content.style.flexDirection = 'column';
+  content.style.gap = '8px';
+
+  // Custom Scrollbar styling
+  const style = document.createElement('style');
+  style.textContent = `
+    #auto-mcgraw-console-content::-webkit-scrollbar {
+      width: 6px;
+    }
+    #auto-mcgraw-console-content::-webkit-scrollbar-track {
+      background: rgba(255, 255, 255, 0.05);
+    }
+    #auto-mcgraw-console-content::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 3px;
+    }
+    #auto-mcgraw-console-content::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.3);
+    }
+    .console-entry {
+        animation: fadeIn 0.3s ease-out forwards;
+        opacity: 0;
+        transform: translateY(5px);
+    }
+    @keyframes fadeIn {
+        to { opacity: 1; transform: translateY(0); }
+    }
+  `;
+
+  container.appendChild(style);
+  container.appendChild(header);
+  container.appendChild(content);
+  document.body.appendChild(container);
+  visualConsole = content;
+}
+
+function logToConsole(message, type = 'info') {
+  if (!visualConsole) createVisualConsole();
+
+  const entry = document.createElement('div');
+  entry.classList.add('console-entry');
+
+  let color = '#cbd5e1'; // Default Slate 300
+  let icon = '•';
+
+  switch (type) {
+    case 'success':
+      color = '#34d399'; // Emerald 400
+      icon = '✓';
+      break;
+    case 'error':
+      color = '#f87171'; // Red 400
+      icon = '✕';
+      break;
+    case 'warning':
+      color = '#fbbf24'; // Amber 400
+      icon = '⚠';
+      break;
+    case 'action':
+      color = '#60a5fa'; // Blue 400
+      icon = '→';
+      break;
+  }
+
+  entry.style.color = color;
+  entry.style.display = 'flex';
+  entry.style.gap = '8px';
+  entry.innerHTML = `
+    <span style="flex-shrink: 0; opacity: 0.7;">${icon}</span>
+    <span>${message}</span>
+  `;
+
+  visualConsole.appendChild(entry);
+  visualConsole.scrollTop = visualConsole.scrollHeight;
+}
+
 
 function setupMessageListener() {
-  console.log("[setupMessageListener] Setting up message listener");
-
   if (messageListener) {
-    console.log("[setupMessageListener] Removing existing listener");
     chrome.runtime.onMessage.removeListener(messageListener);
   }
 
   messageListener = (message, sender, sendResponse) => {
-    console.log("[Message Listener] Received message:", message.type);
-
     if (message.type === "processChatGPTResponse") {
-      console.log("[Message Listener] Processing ChatGPT response");
+      logToConsole("Received answer from Gemini", "success");
+      isProcessing = false; // Release lock
       processChatGPTResponse(message.response);
       sendResponse({ received: true });
       return true;
     }
 
     if (message.type === "alertMessage") {
-      console.log("[Message Listener] Showing alert:", message.message);
+      logToConsole(`Alert: ${message.message}`, "warning");
       alert(message.message);
       sendResponse({ received: true });
       return true;
     }
+
   };
 
   chrome.runtime.onMessage.addListener(messageListener);
-  console.log("[setupMessageListener] Listener added successfully");
 }
 
 function handleTopicOverview() {
@@ -90,50 +224,55 @@ function handleForcedLearning() {
 }
 
 function checkForNextStep() {
-  console.log("[checkForNextStep] Called, isAutomating:", isAutomating);
-
-  if (!isAutomating) {
-    console.log("[checkForNextStep] Not automating, returning");
+  if (!isAutomating || isProcessing) {
+    if (isProcessing) {
+      // Optional: log or ignore, but don't spam console
+    }
     return;
   }
 
-  console.log("[checkForNextStep] Checking for topic overview");
   if (handleTopicOverview()) {
-    console.log("[checkForNextStep] Handled topic overview");
+    logToConsole("Handling topic overview...", "action");
     return;
   }
 
-  console.log("[checkForNextStep] Checking for forced learning");
   if (handleForcedLearning()) {
-    console.log("[checkForNextStep] Handled forced learning");
+    logToConsole("Forced learning detected. handling...", "warning");
     return;
   }
 
-  console.log("[checkForNextStep] Looking for question container");
   const container = document.querySelector(".probe-container");
 
   if (container && !container.querySelector(".forced-learning")) {
-    console.log("[checkForNextStep] Container found, parsing question");
+    logToConsole("Question container found. Parsing...", "action");
     const qData = parseQuestion();
 
     if (qData) {
-      console.log("[checkForNextStep] Question parsed:", qData);
-      console.log("[checkForNextStep] Sending message to background script");
-
+      logToConsole("Question parsed successfully.", "success");
+      logToConsole("Querying Gemini...", "action");
+      isProcessing = true; // Set lock before sending
       chrome.runtime.sendMessage({
         type: "sendQuestionToChatGPT",
         question: qData,
       }, (response) => {
-        console.log("[checkForNextStep] Background script response:", response);
         if (chrome.runtime.lastError) {
-          console.error("[checkForNextStep] Runtime error:", chrome.runtime.lastError);
+          console.error("Error sending question to background script:", chrome.runtime.lastError);
+          logToConsole("Connection to background script failed.", "error");
+          isAutomating = false;
+          isProcessing = false; // Release lock on error
+          alert("Error communicating with background script. Automation stopped.");
         }
       });
     } else {
-      console.log("[checkForNextStep] Question parsing returned null");
+      console.error("Failed to parse question data.");
+      logToConsole("Failed to parse question data.", "error");
+      isAutomating = false; // Stop if we can't parse the question
     }
   } else {
-    console.log("[checkForNextStep] No container found or forced learning present");
+    logToConsole("Waiting for question...", "info");
+    // Optional: Log if we are completely lost, but usually this just means waiting for load
+    // console.error("No question container found."); 
+    // Not stopping automation here as it might be loading
   }
 }
 
@@ -300,23 +439,16 @@ function cleanAnswer(answer) {
 }
 
 function processChatGPTResponse(responseText) {
-  console.log("[processChatGPTResponse] === PROCESSING RESPONSE ===");
-  console.log("[processChatGPTResponse] Raw response text:", responseText);
-
   try {
     if (handleTopicOverview()) {
-      console.log("[processChatGPTResponse] Handled topic overview, returning");
       return;
     }
 
     if (handleForcedLearning()) {
-      console.log("[processChatGPTResponse] Handled forced learning, returning");
       return;
     }
 
-    console.log("[processChatGPTResponse] Parsing JSON response");
     const response = JSON.parse(responseText);
-    console.log("[processChatGPTResponse] Parsed response:", response);
 
     // Extract answers and handle newline-separated answers (for multiple select)
     let answers;
@@ -325,49 +457,59 @@ function processChatGPTResponse(responseText) {
     } else if (typeof response.answer === 'string' && response.answer.includes('\n')) {
       // Split on newlines for multiple select questions
       answers = response.answer.split('\n').map(a => a.trim()).filter(a => a);
-      console.log("[processChatGPTResponse] Split newline-separated answer into array");
     } else {
       answers = [response.answer];
     }
 
-    console.log("[processChatGPTResponse] Extracted answers:", answers);
-
     const container = document.querySelector(".probe-container");
     if (!container) {
-      console.error("[processChatGPTResponse] No probe container found!");
+      console.error("No probe container found when processing response!");
+      logToConsole("Error: Probe container lost.", "error");
+      isAutomating = false;
       return;
     }
 
-    console.log("[processChatGPTResponse] Found probe container");
     lastIncorrectQuestion = null;
     lastCorrectAnswer = null;
 
     if (container.querySelector(".awd-probe-type-matching")) {
-      console.log("[processChatGPTResponse] Matching question detected");
+      logToConsole("Matching question detected. Manual input required.", "warning");
       alert(
         "Matching Question Solution:\n\n" +
         answers.join("\n") +
         "\n\nPlease input these matches manually, then click high confidence and next."
       );
     } else if (container.querySelector(".awd-probe-type-fill_in_the_blank")) {
-      console.log("[processChatGPTResponse] Fill in the blank question detected");
       const inputs = container.querySelectorAll("input.fitb-input");
-      console.log("[processChatGPTResponse] Found", inputs.length, "input fields");
+
+      if (inputs.length === 0) {
+        console.error("Fill in the blank question detected but no input fields found.");
+        logToConsole("Error: No input fields found.", "error");
+        isAutomating = false;
+        return;
+      }
+
+      logToConsole(`Filling ${inputs.length} blanks...`, "action");
 
       inputs.forEach((input, index) => {
         if (answers[index]) {
-          console.log(`[processChatGPTResponse] Filling input ${index} with:`, answers[index]);
           input.value = answers[index];
           input.dispatchEvent(new Event("input", { bubbles: true }));
         }
       });
     } else {
-      console.log("[processChatGPTResponse] Multiple choice/select question detected");
       const choices = container.querySelectorAll(
         'input[type="radio"], input[type="checkbox"]'
       );
 
-      console.log("[processChatGPTResponse] Found", choices.length, "choices");
+      if (choices.length === 0) {
+        console.error("Multiple choice/select question detected but no choices found.");
+        logToConsole("Error: No choices found on screen.", "error");
+        isAutomating = false;
+        return;
+      }
+
+      let matchedAny = false;
 
       choices.forEach((choice, choiceIndex) => {
         const label = choice.closest("label");
@@ -376,26 +518,20 @@ function processChatGPTResponse(responseText) {
             .querySelector(".choiceText")
             ?.textContent.trim();
 
-          console.log(`[processChatGPTResponse] Choice ${choiceIndex}: "${choiceText}"`);
-
           if (choiceText) {
             const shouldBeSelected = answers.some((ans) => {
-              console.log(`[processChatGPTResponse]   Comparing with answer: "${ans}"`);
 
               if (choiceText === ans) {
-                console.log(`[processChatGPTResponse]   ✓ Exact match!`);
                 return true;
               }
 
               const choiceWithoutPeriod = choiceText.replace(/\.$/, "");
               const answerWithoutPeriod = ans.replace(/\.$/, "");
               if (choiceWithoutPeriod === answerWithoutPeriod) {
-                console.log(`[processChatGPTResponse]   ✓ Match without period!`);
                 return true;
               }
 
               if (choiceText === ans + ".") {
-                console.log(`[processChatGPTResponse]   ✓ Match with added period!`);
                 return true;
               }
 
@@ -403,73 +539,79 @@ function processChatGPTResponse(responseText) {
             });
 
             if (shouldBeSelected) {
-              console.log(`[processChatGPTResponse] ✓✓✓ CLICKING choice ${choiceIndex}: "${choiceText}"`);
+              logToConsole(`Selecting: "${choiceText}"`, "action");
               choice.click();
-            } else {
-              console.log(`[processChatGPTResponse]   Skipping choice ${choiceIndex}`);
+              matchedAny = true;
             }
           }
         }
       });
-    }
 
-    console.log("[processChatGPTResponse] Answer selection complete");
+      if (!matchedAny) {
+        console.error("Could not match any of the provided answers to the choices on screen.");
+        logToConsole("Error: Could not match AI answer to choices.", "error");
+        isAutomating = false;
+        alert("Could not match AI answer to screen choices. Stopping automation.");
+        return;
+      }
+    }
 
     if (isAutomating) {
-      console.log("[processChatGPTResponse] Automation is ON, waiting for confidence button");
-      waitForElement(
-        '[data-automation-id="confidence-buttons--high_confidence"]:not([disabled])',
-        10000
-      )
-        .then((button) => {
-          console.log("[processChatGPTResponse] Confidence button found, clicking");
-          button.click();
+      // Small delay to ensure UI updates
+      setTimeout(() => {
+        logToConsole("Clicking High Confidence...", "action");
+        waitForElement(
+          '[data-automation-id="confidence-buttons--high_confidence"]:not([disabled])',
+          10000
+        )
+          .then((button) => {
+            button.click();
 
-          setTimeout(() => {
-            const incorrectMarker = container.querySelector(
-              ".awd-probe-correctness.incorrect"
-            );
-            if (incorrectMarker) {
-              console.log("[processChatGPTResponse] Answer was incorrect, extracting correct answer");
-              const correctionData = extractCorrectAnswer();
-              if (correctionData && correctionData.answer) {
-                lastIncorrectQuestion = correctionData.question;
-                lastCorrectAnswer = cleanAnswer(correctionData.answer);
-                console.log(
-                  "[processChatGPTResponse] Correct answer was:",
-                  lastCorrectAnswer
-                );
+            setTimeout(() => {
+              const incorrectMarker = container.querySelector(
+                ".awd-probe-correctness.incorrect"
+              );
+              if (incorrectMarker) {
+                logToConsole("Answer was incorrect. Recording correct answer.", "warning");
+                const correctionData = extractCorrectAnswer();
+                if (correctionData && correctionData.answer) {
+                  lastIncorrectQuestion = correctionData.question;
+                  lastCorrectAnswer = cleanAnswer(correctionData.answer);
+                }
+              } else {
+                logToConsole("Answer was correct!", "success");
               }
-            } else {
-              console.log("[processChatGPTResponse] Answer was correct!");
-            }
 
-            console.log("[processChatGPTResponse] Waiting for next button");
-            waitForElement(".next-button", 10000)
-              .then((nextButton) => {
-                console.log("[processChatGPTResponse] Next button found, clicking");
-                nextButton.click();
-                setTimeout(() => {
-                  console.log("[processChatGPTResponse] Moving to next question");
-                  checkForNextStep();
-                }, 1000);
-              })
-              .catch((error) => {
-                console.error("[processChatGPTResponse] Next button error:", error);
-                isAutomating = false;
-              });
-          }, 1000);
-        })
-        .catch((error) => {
-          console.error("[processChatGPTResponse] Confidence button error:", error);
-          isAutomating = false;
-        });
-    } else {
-      console.log("[processChatGPTResponse] Automation is OFF, not proceeding");
+              logToConsole("Moving to next question...", "action");
+
+              waitForElement(".next-button", 10000)
+                .then((nextButton) => {
+                  nextButton.click();
+                  setTimeout(() => {
+                    checkForNextStep();
+                  }, 1000);
+                })
+                .catch((error) => {
+                  console.error("Next button not found:", error);
+                  logToConsole("Error: Next button not found.", "error");
+                  isAutomating = false;
+                  isProcessing = false;
+                });
+            }, 1000);
+          })
+          .catch((error) => {
+            console.error("Confidence button not found:", error);
+            logToConsole("Error: Confidence button not found.", "error");
+            isAutomating = false;
+            isProcessing = false;
+          });
+      }, 500);
     }
   } catch (e) {
-    console.error("[processChatGPTResponse] Error processing response:", e);
-    console.error("[processChatGPTResponse] Stack trace:", e.stack);
+    console.error("Error processing response:", e);
+    logToConsole(`Error processing response: ${e.message}`, "error");
+    isAutomating = false;
+    isProcessing = false;
   }
 }
 
@@ -501,6 +643,8 @@ function addAssistantButton() {
     retryBtn.addEventListener("click", () => {
       // Stop current automation
       isAutomating = false;
+      isProcessing = false;
+      logToConsole("Retrying...", "warning");
 
       // Wait a brief moment then restart
       setTimeout(() => {
@@ -515,6 +659,7 @@ function addAssistantButton() {
       }, 1000);
     });
 
+
     // Main button container
     const mainButtonGroup = document.createElement("div");
     mainButtonGroup.style.display = "flex";
@@ -527,47 +672,41 @@ function addAssistantButton() {
     btn.style.color = "white";
     btn.style.border = "1px solid white";
     btn.addEventListener("click", () => {
-      console.log("[Ask Gemini Button] Clicked, isAutomating:", isAutomating);
 
       if (isAutomating) {
-        console.log("[Ask Gemini Button] Stopping automation");
+        logToConsole("Stopping automation...", "warning");
         isAutomating = false;
         btn.textContent = "Ask Gemini";
         retryBtn.style.display = "none";
       } else {
-        console.log("[Ask Gemini Button] Checking API key");
         // Check if API key is configured
         chrome.storage.sync.get("geminiApiKey", function (data) {
-          console.log("[Ask Gemini Button] API key check result:", data.geminiApiKey ? "Found" : "Not found");
 
           if (!data.geminiApiKey) {
-            console.log("[Ask Gemini Button] No API key, showing alert");
             alert(
               "No Gemini API key configured.\n\nPlease click the settings icon and enter your Gemini API key to use automation."
             );
             return;
           }
 
-          console.log("[Ask Gemini Button] Showing confirmation dialog");
           const proceed = confirm(
             "Start automated answering with Gemini AI?\n\nClick OK to begin, or Cancel to stop."
           );
 
-          console.log("[Ask Gemini Button] User confirmation:", proceed);
-
           if (proceed) {
-            console.log("[Ask Gemini Button] Starting automation");
+            createVisualConsole();
+            logToConsole("Automation started...", "success");
             isAutomating = true;
             btn.textContent = "Stop Automation";
             retryBtn.style.display = "flex";
             retryBtn.style.justifyContent = "center";
             retryBtn.style.alignItems = "center";
 
-            console.log("[Ask Gemini Button] Calling checkForNextStep");
             checkForNextStep();
           }
         });
       }
+
     });
 
     mainButtonGroup.appendChild(btn);
@@ -667,18 +806,13 @@ function waitForElement(selector, timeout = 5000) {
   });
 }
 
-console.log("=== AUTO-MCGRAW CONTENT SCRIPT LOADED ===");
-console.log("[Init] Setting up message listener");
-setupMessageListener();
 
-console.log("[Init] Adding assistant button");
+setupMessageListener();
 addAssistantButton();
 
-console.log("[Init] Checking isAutomating:", isAutomating);
 if (isAutomating) {
-  console.log("[Init] Resuming automation");
   setTimeout(() => {
     checkForNextStep();
   }, 1000);
 }
-console.log("=== AUTO-MCGRAW READY ===");
+
