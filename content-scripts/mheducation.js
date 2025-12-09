@@ -4,6 +4,7 @@ let lastIncorrectQuestion = null;
 let lastCorrectAnswer = null;
 let visualConsole = null;
 let isProcessing = false; // Lock to prevent multiple simultaneous requests
+let matchingRetryCount = 0; // Track retries for matching failures
 
 
 function createVisualConsole() {
@@ -155,10 +156,76 @@ function setupMessageListener() {
       return true;
     }
 
+    if (message.type === "pickRandomAnswer") {
+      logToConsole("Picking random answer due to parse errors...", "warning");
+      isProcessing = false; // Release lock
+
+      // Find all choices on the page
+      const container = document.querySelector(".probe-container");
+      if (container) {
+        const choices = container.querySelectorAll('input[type="radio"], input[type="checkbox"]');
+
+        if (choices.length > 0) {
+          const randomIndex = Math.floor(Math.random() * choices.length);
+          const randomChoice = choices[randomIndex];
+
+          const label = randomChoice.closest("label");
+          const choiceText = label ? label.querySelector(".choiceText")?.textContent.trim() : "Unknown";
+          logToConsole(`Randomly selected: "${choiceText}"`, "action");
+
+          randomChoice.click();
+
+          // Continue with confidence button
+          if (isAutomating) {
+            setTimeout(() => {
+              logToConsole("Clicking High Confidence...", "action");
+              waitForElement('[data-automation-id="confidence-buttons--high_confidence"]:not([disabled])', 10000)
+                .then((button) => {
+                  button.click();
+                  setTimeout(() => {
+                    logToConsole("Moving to next question...", "action");
+                    waitForElement(".next-button", 10000)
+                      .then((nextButton) => {
+                        nextButton.click();
+                        setTimeout(() => {
+                          checkForNextStep();
+                        }, 1000);
+                      })
+                      .catch((err) => {
+                        console.error("Could not find next button:", err);
+                        isAutomating = false;
+                      });
+                  }, 2000);
+                })
+                .catch((err) => {
+                  console.error("Could not find confidence button:", err);
+                  isAutomating = false;
+                });
+            }, 500);
+          }
+        } else {
+          logToConsole("No choices found to pick from.", "error");
+          isAutomating = false;
+        }
+      } else {
+        logToConsole("No question container found.", "error");
+        isAutomating = false;
+      }
+
+      sendResponse({ received: true });
+      return true;
+    }
+
     if (message.type === "alertMessage") {
       logToConsole(`Alert: ${message.message}`, "warning");
       alert(message.message);
       sendResponse({ received: true });
+      return true;
+    }
+
+    if (message.type === "logToConsole") {
+      logToConsole(message.message, message.level || 'info');
+      sendResponse({ received: true, isAutomating: isAutomating });
       return true;
     }
 
@@ -438,6 +505,14 @@ function cleanAnswer(answer) {
   return answer;
 }
 
+function normalizeFuzzy(text) {
+  if (!text) return "";
+  return text.toLowerCase()
+    .replace(/\s+/g, " ") // Collapse whitespace
+    .replace(/[^\w\s]/g, "") // Remove punctuation
+    .trim();
+}
+
 function processChatGPTResponse(responseText) {
   try {
     if (handleTopicOverview()) {
@@ -498,18 +573,25 @@ function processChatGPTResponse(responseText) {
         }
       });
     } else {
+      let matchedAny = false;
+
       const choices = container.querySelectorAll(
         'input[type="radio"], input[type="checkbox"]'
       );
 
       if (choices.length === 0) {
-        console.error("Multiple choice/select question detected but no choices found.");
-        logToConsole("Error: No choices found on screen.", "error");
-        isAutomating = false;
-        return;
+        // Check for High Confidence button (Self-assessment type)
+        const highConfidence = document.querySelector('[data-automation-id="confidence-buttons--high_confidence"]:not([disabled])');
+        if (highConfidence) {
+          logToConsole("Self-assessment detected (No choices). Proceeding to confidence...", "action");
+          matchedAny = true; // Skip matching check
+        } else {
+          console.error("Multiple choice/select question detected but no choices found.");
+          logToConsole("Error: No choices found on screen.", "error");
+          isAutomating = false;
+          return;
+        }
       }
-
-      let matchedAny = false;
 
       choices.forEach((choice, choiceIndex) => {
         const label = choice.closest("label");
@@ -535,6 +617,15 @@ function processChatGPTResponse(responseText) {
                 return true;
               }
 
+              if (choiceText === ans + ".") {
+                return true;
+              }
+
+              // Fuzzy Match (Normalized)
+              if (normalizeFuzzy(choiceText) === normalizeFuzzy(ans)) {
+                return true;
+              }
+
               return false;
             });
 
@@ -548,11 +639,27 @@ function processChatGPTResponse(responseText) {
       });
 
       if (!matchedAny) {
-        console.error("Could not match any of the provided answers to the choices on screen.");
-        logToConsole("Error: Could not match AI answer to choices.", "error");
-        isAutomating = false;
-        alert("Could not match AI answer to screen choices. Stopping automation.");
-        return;
+        console.warn("Could not match any of the provided answers to the choices on screen. Picking random...");
+        logToConsole("Warning: No match found. Picking random choice...", "warning");
+
+        // Pick a random choice
+        if (choices.length > 0) {
+          const randomIndex = Math.floor(Math.random() * choices.length);
+          const randomChoice = choices[randomIndex];
+
+          // Log what we picked
+          const label = randomChoice.closest("label");
+          const choiceText = label ? label.querySelector(".choiceText")?.textContent.trim() : "Unknown";
+          logToConsole(`Randomly selected: "${choiceText}"`, "action");
+
+          randomChoice.click();
+          matchedAny = true;
+        } else {
+          console.error("No choices available to pick from.");
+          logToConsole("Error: No choices on screen.", "error");
+          isAutomating = false;
+          return;
+        }
       }
     }
 
@@ -660,6 +767,27 @@ function addAssistantButton() {
     });
 
 
+    // Rotate Key Button
+    const rotateKeyBtn = document.createElement("button");
+    rotateKeyBtn.classList.add("btn", "btn-secondary");
+    rotateKeyBtn.style.width = "36px";
+    rotateKeyBtn.style.height = "36px";
+    rotateKeyBtn.style.borderRadius = "50%";
+    rotateKeyBtn.style.padding = "0";
+    rotateKeyBtn.style.display = "none";
+    rotateKeyBtn.style.border = "2px solid white";
+    rotateKeyBtn.style.color = "white";
+    rotateKeyBtn.title = "Rotate API Key";
+    rotateKeyBtn.innerHTML = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path>
+      </svg>
+    `;
+    rotateKeyBtn.addEventListener("click", () => {
+      // Functionality disabled
+      logToConsole("Rotate Key functionality is currently disabled.", "warning");
+    });
+
     // Main button container
     const mainButtonGroup = document.createElement("div");
     mainButtonGroup.style.display = "flex";
@@ -667,8 +795,8 @@ function addAssistantButton() {
     const btn = document.createElement("button");
     btn.textContent = "Ask Gemini";
     btn.classList.add("btn", "btn-secondary");
-    btn.style.borderTopRightRadius = "0";
-    btn.style.borderBottomRightRadius = "0";
+    // btn.style.borderTopRightRadius = "0"; // Removed since settings btn is gone
+    // btn.style.borderBottomRightRadius = "0"; // Removed
     btn.style.color = "white";
     btn.style.border = "1px solid white";
     btn.addEventListener("click", () => {
@@ -678,6 +806,7 @@ function addAssistantButton() {
         isAutomating = false;
         btn.textContent = "Ask Gemini";
         retryBtn.style.display = "none";
+        rotateKeyBtn.style.display = "none";
       } else {
         // Check if API key is configured
         chrome.storage.sync.get("geminiApiKey", function (data) {
@@ -697,12 +826,19 @@ function addAssistantButton() {
             createVisualConsole();
             logToConsole("Automation started...", "success");
             isAutomating = true;
+            isProcessing = false; // Reset lock to ensure clean start
             btn.textContent = "Stop Automation";
             retryBtn.style.display = "flex";
             retryBtn.style.justifyContent = "center";
             retryBtn.style.alignItems = "center";
+            rotateKeyBtn.style.display = "flex";
+            rotateKeyBtn.style.justifyContent = "center";
+            rotateKeyBtn.style.alignItems = "center";
 
-            checkForNextStep();
+            // Small delay to ensure state settles before first check
+            setTimeout(() => {
+              checkForNextStep();
+            }, 500);
           }
         });
       }
@@ -712,6 +848,7 @@ function addAssistantButton() {
     mainButtonGroup.appendChild(btn);
     // Settings button removed as requested
 
+    buttonContainer.appendChild(rotateKeyBtn);
     buttonContainer.appendChild(retryBtn);
     buttonContainer.appendChild(mainButtonGroup);
     headerNav.appendChild(buttonContainer);

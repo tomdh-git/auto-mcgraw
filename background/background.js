@@ -60,16 +60,18 @@ function sendMessageWithRetry(tabId, message, maxAttempts = 3, delay = 1000) {
  * Processes a question from McGraw Hill
  * Uses EXACT same logic as original gemini.js but with direct API calls
  */
-async function processQuestion(message) {
+async function processQuestion(message, parseRetryCount = 0) {
   debugLog("processQuestion", "=== STARTING QUESTION PROCESSING ===");
   debugLog("processQuestion", "Received question", message.question);
 
-  if (processingQuestion) {
+  if (processingQuestion && parseRetryCount === 0) {
     debugLog("processQuestion", "Already processing a question, skipping");
     return;
   }
 
-  processingQuestion = true;
+  if (parseRetryCount === 0) {
+    processingQuestion = true;
+  }
 
   try {
     mheTabId = message.sourceTabId;
@@ -95,22 +97,31 @@ async function processQuestion(message) {
     debugLog("processQuestion", "Calling Gemini API...");
 
     try {
-      // Call Gemini API directly - EXACT same prompt format as original
-      debugLog("processQuestion", "=== CALLING GEMINI API ===");
-      const apiResponse = await askGemini(apiKey, message.question);
+      const onStatusUpdate = async (status) => {
+        if (status && status.type === "logToConsole") {
+          debugLog("processQuestion", "Sending status update", status);
+          try {
+            const response = await sendMessageWithRetry(mheTabId, status, 1, 1000);
+            if (!response || response.isAutomating === false) {
+              return false;
+            }
+            return true;
+          } catch (e) {
+            return false;
+          }
+        }
+        return true;
+      };
 
+      const apiResponse = await askGemini(apiKey, message.question, 0, onStatusUpdate);
       debugLog("processQuestion", "=== API RESPONSE RECEIVED ===", apiResponse);
 
-      // Process response EXACTLY like original gemini.js
       let responseText;
-
       if (typeof apiResponse === "string") {
         responseText = apiResponse;
       } else if (apiResponse.answer) {
-        // Already parsed JSON with answer field
         responseText = JSON.stringify(apiResponse);
       } else {
-        // Try to stringify if it's an object
         responseText = JSON.stringify(apiResponse);
       }
 
@@ -170,6 +181,36 @@ async function processQuestion(message) {
     } catch (apiError) {
       debugError("processQuestion", "API call failed", apiError);
 
+      // Check if this is a parse error and we haven't retried yet
+      if ((apiError.message.includes("parse") || apiError.message.includes("JSON")) && parseRetryCount === 0) {
+        debugLog("processQuestion", "Parse error detected. Retrying once...");
+        await sendMessageWithRetry(mheTabId, {
+          type: "logToConsole",
+          message: "Parse error. Retrying request...",
+          level: "warning"
+        });
+
+        // Retry the entire question processing with incremented retry count
+        return await processQuestion(message, 1);
+      }
+
+      // If this was the second parse error, pick random answer
+      if ((apiError.message.includes("parse") || apiError.message.includes("JSON")) && parseRetryCount === 1) {
+        debugLog("processQuestion", "Parse error on retry. Instructing content script to pick random answer.");
+        await sendMessageWithRetry(mheTabId, {
+          type: "logToConsole",
+          message: "Parse error persisted. Picking random answer...",
+          level: "warning"
+        });
+
+        await sendMessageWithRetry(mheTabId, {
+          type: "pickRandomAnswer"
+        });
+
+        processingQuestion = false;
+        return;
+      }
+
       let errorMessage = "Failed to get response from Gemini AI.";
 
       if (apiError.message.includes("API key") || apiError.message.includes("403")) {
@@ -178,9 +219,9 @@ async function processQuestion(message) {
         errorMessage = "API rate limit exceeded. Please wait a moment and try again.";
       } else if (apiError.message.includes("network") || apiError.message.includes("fetch")) {
         errorMessage = "Network error. Please check your internet connection.";
-      } else if (apiError.message.includes("parse") || apiError.message.includes("JSON")) {
-        errorMessage = "Failed to parse API response. The AI may have returned an invalid format.";
-      } else if (apiError.message.includes("Stopped") || apiError.message.includes("blocked")) {
+      } else if (apiError.message.includes("MAX_TOKENS")) {
+        errorMessage = "Response too long (MAX_TOKENS). The AI stopped speaking.";
+      } else if (apiError.message.includes("blocked") || apiError.message.includes("SAFETY")) {
         errorMessage = "Content was blocked by safety filters. Try rephrasing the question.";
       }
 
@@ -201,8 +242,10 @@ async function processQuestion(message) {
       });
     }
   } finally {
-    processingQuestion = false;
-    debugLog("processQuestion", "Processing flag reset");
+    if (parseRetryCount === 0 || parseRetryCount === 1) {
+      processingQuestion = false;
+      debugLog("processQuestion", "Processing flag reset");
+    }
   }
 }
 
@@ -258,6 +301,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch((error) => {
         debugError("onMessage", "Test failed", error);
         sendResponse({ valid: false, error: error.message });
+      });
+    return true;
+  }
+
+  if (message.type === "manualKeyRotation") {
+    debugLog("onMessage", "Manual key rotation triggered");
+    rotateApiKey()
+      .then((newKey) => {
+        debugLog("onMessage", "Manual rotation success", newKey);
+        sendResponse({ success: true, apiKey: newKey });
+      })
+      .catch((error) => {
+        debugError("onMessage", "Manual rotation failed", error);
+        sendResponse({ success: false, error: error.message });
       });
     return true;
   }
